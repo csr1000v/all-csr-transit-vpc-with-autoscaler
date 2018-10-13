@@ -1,0 +1,1748 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "(SO0001) - Spoke VPC: This template creates one or two CSRs in a Spoke VPC and connects it with the transit VPC. Cisco CSRs for routing traffic. ***NOTE*** You must first subscribe to the appropriate Cisco CSR marketplace BYOL or License Included AMI from the AWS Marketplace before you launch this template. Version 3",
+
+  "Parameters" : {
+    "KeyName" : {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type" : "AWS::EC2::KeyPair::KeyName",
+      "Default" : "Lab"
+    },
+    "TerminationProtection" : {
+      "Description" : "Enable termination protection on the CSR EC2 instances to avoid accidential CSR termination?",
+      "Type" : "String",
+      "Default" : "No",
+      "AllowedValues" : ["Yes", "No"]
+    },
+    "HighAvailability" : {
+      "Description" : "Run two CSR instances in HA Mode? Additional costs apply",
+      "Type" : "String",
+      "Default" : "No",
+      "AllowedValues" : ["Yes", "No"]
+    },
+    "CSRType" : {
+      "Description" : "Maximum network throughput required for CSR instances.",
+      "Type" : "String",
+      "Default" : "2x500Mbps",
+      "AllowedValues" : [ "2x200Mbps", "2x400Mbps", "2x500Mbps","2x1Gbps", "2x2Gbps", "2x4.5Gbps" ]
+    },
+    "LicenseModel" : {
+      "Description" : "BYOL(Bring Your Own License).Remember to first subscribe the the appropriate Marketplace AMI!",
+      "Type" : "String",
+      "Default" : "BYOL",
+      "AllowedValues" : ["BYOL"]
+    },
+    "S3Prefix" : {
+      "Description" : "S3 prefix to append before S3 key names.",
+      "Type" : "String",
+      "Default" : "vpnconfigs/"
+    },
+    "SingleAvailabilityZone" : {
+      "Description" : "Create EC2 instances in one availability zone",
+      "Type" : "String",
+      "Default" : "No",
+      "AllowedValues" : ["Yes", "No"]
+    },
+    "TransitVPCS3Bucket" : {
+      "Description" : "S3 bucket of the existing Transit VPC.",
+      "Type" : "String",
+      "AllowedPattern":".+"
+    },
+    "TransitPreferPath" : {
+      "Description" : "Prefer path on Transit VPC.",
+      "Type" : "String",
+      "Default" : "none",
+      "AllowedValues" : ["none", "CSR1", "CSR2"]
+    },
+    "SpokeVPC" : {
+      "Description" : "Existing Spoke VPC ID.",
+      "Type" : "AWS::EC2::VPC::Id",
+      "AllowedPattern":".+"
+    },
+    "SendAnonymousData": {
+        "Description": "Choose to send anonymous data to AWS.",
+        "Type": "String",
+        "Default": "Yes",
+        "AllowedValues": [
+            "Yes",
+            "No"
+        ]
+    }
+  },
+  "Conditions" : {
+     "SingleAvailabilityZoneCond" : {"Fn::Equals" : [{"Ref": "SingleAvailabilityZone"}, "Yes"]},
+     "EnableTerm" : {"Fn::Equals" : [{"Ref" : "TerminationProtection"}, "Yes"]},
+     "SendData" : {"Fn::Equals" : [{"Ref" : "SendAnonymousData"}, "Yes"]},
+     "EnableHA" : {"Fn::Equals" : [{"Ref" : "HighAvailability"}, "Yes"]}
+  },
+  "Metadata" : {
+    "AWS::CloudFormation::Interface" : {
+     "ParameterGroups" : [
+      {
+        "Label" : { "default":"Cisco CSR Configuration" },
+        "Parameters" : [ "CSRType", "KeyName", "LicenseModel", "TerminationProtection", "HighAvailability", "SingleAvailabilityZone" ]
+      },
+      {
+        "Label" : { "default":"AWS Service Configuration" },
+        "Parameters" : [ "S3Prefix", "TransitVPCS3Bucket", "TransitPreferPath" ]
+      },
+      {
+        "Label" : { "default" : "Network Configuration" },
+        "Parameters" : [ "SpokeVPC"]
+      },
+      {
+        "Label": { "default": "Anonymous Metrics Request" },
+        "Parameters": [ "SendAnonymousData" ]
+      }
+     ],
+     "ParameterLabels" : {
+      "SpokeVPC" : {"default" : "Use existing VPC"},  
+      "CSRType" : { "default" : "CSR Throughput Requirements" },
+      "KeyName" : { "default" : "SSH Key to access CSR" },
+      "S3Prefix" : { "default" : "Prefix for S3 Objects" },
+      "LicenseModel" : { "default" : "License Model" },
+      "TerminationProtection" : { "default" : "Enable Termination Protection" },
+      "HighAvailability" : { "default" : "Enable High Availability" },
+      "SingleAvailabilityZone" : { "default" : "Create CSRs in a single availability zone" },
+      "TransitVPCS3Bucket" : { "default" : "Transit VPC S3 Bucket" }
+     }
+    }
+  },
+  "Mappings" : {
+    "Function" : {
+      "Configurator" : {
+        "CodeRegion" : "us-east-1",
+        "Name" : "cisco-configurator",
+        "Description": "Spoke VPC: This function is invoked when a generic VPN configuration is placed in an S3 bucket - it converts the generic information into Cisco IOS specific commands and pushes the config to spoke VPC routers.",
+        "Runtime": "python2.7",
+        "Timeout": "300",
+        "MemorySize": "128"
+      },
+      "SpokeBroker" : {
+        "CodeRegion" : "us-east-1",
+        "Name" : "spoke-broker",
+        "Description": "Spoke VPC: Broker function responsible for configuring Spoke VPC and writing files into Transit VPC S3",
+        "Runtime": "python2.7",
+        "Timeout": "300",
+        "MemorySize": "128"
+      },
+      "FindReplace" : {
+		"TVPCS3BucketID" : "%BUCKET_NAME%",
+		"TVPCS3PrefixID" : "%PREFIX%",
+		"SpokeS3BucketID" : "%SPOKE_BUCKET_NAME%",
+		"SpokeS3PrefixID" : "%SPOKE_PREFIX%",
+  		"SpokeVPCID" : "%SPOKE_VPC_ID%",
+    	"SpokeRegion" : "%SPOKE_REGION%",
+		"Deliminator" : "|"
+      },
+      "Csr" : {
+		"UserName" : "automate",
+		"PasswordLength" : "15",
+		"PrivateKey" : "prikey.pem",
+		"PublicKey" : "pubkey.pem"
+      }
+    },
+    "CsrInstance" : {
+      "2x200Mbps"   : { "Type" : "t2.medium", "Bandwidth"  : "200000" }, 
+      "2x400Mbps"   : { "Type" : "t2.large",  "Bandwidth"  : "400000" },
+      "2x500Mbps"   : { "Type" : "c4.large",   "Bandwidth" : "500000" },
+      "2x1Gbps"     : { "Type" : "c4.xlarge", "Bandwidth"  : "1000000" },
+      "2x2Gbps"     : { "Type" : "c4.2xlarge", "Bandwidth" : "2000000" },
+      "2x4.5Gbps"   : { "Type" : "c4.4xlarge", "Bandwidth" : "4500000" }
+    },
+    "BucketVersion":{
+      "released" :{"Version":"released"}
+    }
+  },
+  "Resources" : {
+    "VPNConfigS3Bucket" : {
+      "Type" : "AWS::S3::Bucket"
+    },
+    "SpokeS3EventSqs": {
+            "Type": "Custom::LoadLambda",
+            "DependsOn" : ["SpokeSqsQueuePolicy"],
+            "Properties": {
+              "ServiceToken": { "Fn::GetAtt" : ["SpokeSolutionHelper", "Arn"] },
+              "Region": { "Ref": "AWS::Region" },
+              "SpokeS3SqsEvent" : { "Fn::Join": ["", [
+                "{ 'Bucket' : '",{ "Ref" : "VPNConfigS3Bucket" },"', ",
+                "'EventPattern' : {",
+                "'QueueConfigurations' : [ {",
+                "'QueueArn': '",{ "Fn::GetAtt": [ "SpokeSqsQueue", "Arn" ]},"',",
+                "'Events': ['s3:ObjectCreated:Put' ],",
+                "'Filter': {",
+                "'Key': {",
+                "'FilterRules': [ {",
+                "'Name': 'prefix',",
+                "'Value': '",{ "Ref" : "S3Prefix" },"'",
+                "}, {",
+                "'Name': 'suffix',",
+                "'Value': '.conf'",
+                "} ] } }",
+                "} ],",
+                "} }"
+              ]] }
+            }
+          },
+    "VPNConfigBucketPolicy" : {
+      "Type" : "AWS::S3::BucketPolicy",
+      "Properties" : {
+        "Bucket" : {"Ref" : "VPNConfigS3Bucket" },
+        "PolicyDocument": {
+          "Statement":[ {
+	    "Sid": "DenyUnEncryptedObjectUploads",
+	    "Effect": "Deny",
+	    "Principal": "*",
+	    "Action": "s3:PutObject",
+	    "Resource": { "Fn::Join" : ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" },"/",{ "Ref" : "S3Prefix" }, "*" ]]},
+	    "Condition": {
+		"StringNotEquals": {
+		  "s3:x-amz-server-side-encryption": "aws:kms"
+		}
+	    }
+	  },
+	  {
+	    "Action":["s3:GetObject", "s3:PutObject", "s3:PutObjectAcl"],
+	    "Effect":"Allow",
+	    "Resource": { "Fn::Join" : ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" },"/",{ "Ref" : "S3Prefix" }, "*" ]]},
+	    "Principal": {
+		"AWS" : [{ "Fn::Join" : ["", ["arn:aws:iam::",{ "Ref" : "AWS::AccountId" }, ":root" ]]}]
+	    }
+	  }]
+        }
+      }
+    },
+    "ChangeRouteRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version" : "2012-10-17",
+          "Statement": [ {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ec2.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          } ]
+        },
+        "Path": "/"
+      }
+   },
+   "ChangeRouteRolePolicy" : {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+          "Roles" : [ { "Ref" : "ChangeRouteRole" } ],
+          "PolicyName": "Change_Route_Role_Permissions",
+          "PolicyDocument": {
+              "Version" : "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                	"ec2:AssociateRouteTable",
+                	"ec2:CreateRoute",
+                	"ec2:CreateRouteTable",
+                	"ec2:DeleteRoute",
+                	"ec2:DeleteRouteTable",
+                	"ec2:DescribeRouteTables",
+                	"ec2:DescribeVpcs",
+                	"ec2:ReplaceRoute",
+                	"ec2:DisassociateRouteTable",
+                	"ec2:ReplaceRouteTableAssociation",
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "*"
+                }
+             ]
+        }
+      }
+    },
+    "KMSKey" : {
+      "Type" : "AWS::KMS::Key",
+      "Properties" : {
+        "Description" : "SpokeVPC CMK for S3 SSE-KMS",
+        "KeyPolicy" : {
+          "Version": "2012-10-17",
+          "Id": "spoke-vpc-1",
+          "Statement": [ {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": { "AWS": [
+		{ "Fn::Join" : ["", ["arn:aws:iam::",{ "Ref" : "AWS::AccountId" }, ":root" ]]}
+	    ] },
+            "Action": [
+              "kms:*"
+            ], 
+            "Resource": "*"
+          },
+	  {
+            "Sid": "Allow use of the key",
+            "Effect": "Allow",
+            "Principal": { "AWS": [
+		{ "Fn::Join" : ["", ["arn:aws:iam::",{ "Ref" : "AWS::AccountId" }, ":root" ]]},
+                { "Fn::GetAtt" : ["SpokeSolutionHelperRole", "Arn"] },
+		{ "Fn::GetAtt" : ["SpokeConfigFunctionRole", "Arn"] },
+                { "Fn::GetAtt" : ["SpokeBrokerRole", "Arn"] }
+	    ] },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:ReEncrypt*",
+              "kms:GenerateDataKey*",
+              "kms:DescribeKey"
+            ], 
+            "Resource": "*"
+          } ]
+        }
+      }
+    },
+    "VPCPubSub1" : {
+      "Type" : "AWS::EC2::Subnet",
+      "Properties" : {
+        "VpcId" : { "Ref" : "SpokeVPC" }, 
+        "CidrBlock" : {"Fn::GetAtt" : ["FindSubnetAndGateway","AutoPubSubnet1" ]},
+        "AvailabilityZone" : { "Fn::Select": ["0", {"Fn::GetAZs": ""}] },
+        "Tags" : [
+          { "Key" : "Network", "Value" : "Public" },
+          { "Key" : "Name", "Value" : "Spoke VPC Subnet1" }
+        ]
+      }
+    },
+    "VPCPubSub2" : {
+      "Type" : "AWS::EC2::Subnet",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "VpcId" : { "Ref" : "SpokeVPC" },
+        "CidrBlock" : {"Fn::GetAtt" : ["FindSubnetAndGateway","AutoPubSubnet2" ]},
+        "AvailabilityZone" : {"Fn::If": ["SingleAvailabilityZoneCond", { "Fn::Select": ["0", {"Fn::GetAZs": ""}] }, { "Fn::Select": ["1", {"Fn::GetAZs": ""}] }]},
+        "Tags" : [
+          { "Key" : "Network", "Value" : "Public" },
+          { "Key" : "Name", "Value" : "Spoke VPC Subnet2" }
+        ]
+      }
+    },
+    "VPCPrivateSub1" : {
+      "Type" : "AWS::EC2::Subnet",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "VpcId" : { "Ref" : "SpokeVPC" },
+        "CidrBlock" : {"Fn::GetAtt" : ["FindSubnetAndGateway","AutoPrivateSubnet1" ]},
+        "AvailabilityZone" : { "Fn::Select": ["0", {"Fn::GetAZs": ""}] },
+        "Tags" : [
+          { "Key" : "Network", "Value" : "Private" },
+          { "Key" : "Name", "Value" : "Spoke VPC Private Subnet AZ1" }
+        ]
+      }
+    },
+    "VPCPrivateSub2" : {
+      "Type" : "AWS::EC2::Subnet",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "VpcId" : { "Ref" : "SpokeVPC" },
+        "CidrBlock" : {"Fn::GetAtt" : ["FindSubnetAndGateway","AutoPrivateSubnet2" ]},
+        "AvailabilityZone" : {"Fn::If": ["SingleAvailabilityZoneCond", { "Fn::Select": ["0", {"Fn::GetAZs": ""}] }, { "Fn::Select": ["1", {"Fn::GetAZs": ""}] }]},
+        "Tags" : [
+          { "Key" : "Network", "Value" : "Private" },
+          { "Key" : "Name", "Value" : "Spoke VPC Private Subnet AZ2" }
+        ]
+      }
+    },
+    
+    "VPCRouteTable" : {
+      "Type" : "AWS::EC2::RouteTable",
+      "Properties" : {
+        "VpcId" : { "Ref" : "SpokeVPC" },
+        "Tags" : [
+          { "Key" : "Network", "Value" : "Public" },
+          { "Key" : "Name", "Value" : "Spoke VPC" }
+        ]
+      }
+    },
+    "VPCPrivateRouteTable" : {
+      "Type" : "AWS::EC2::RouteTable",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "VpcId" : { "Ref" : "SpokeVPC" },
+        "Tags" : [
+          { "Key" : "Network", "Value" : "Private" },
+          { "Key" : "Name", "Value" : "Spoke VPC Private" }
+        ]
+      }
+    },
+    "VPCPublicRoute" : {
+      "Type" : "AWS::EC2::Route",
+      "Properties" : {
+        "RouteTableId" : { "Ref" : "VPCRouteTable" },
+        "DestinationCidrBlock" : "0.0.0.0/0",
+        "GatewayId" : { "Fn::GetAtt" : ["FindSubnetAndGateway", "FoundIGWId"]}
+      }
+    },  
+    "VPCPrivateRoute" : {
+      "Type" : "AWS::EC2::Route",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "RouteTableId" : { "Ref" : "VPCPrivateRouteTable" },
+        "DestinationCidrBlock" : "0.0.0.0/0",
+        "NetworkInterfaceId" : { "Ref" : "CSR1Gig2" }
+      }
+    },
+
+    "S3Endpoint" : {
+      "Type" : "AWS::EC2::VPCEndpoint",
+      "Properties" : {
+        "PolicyDocument" : {
+          "Version":"2012-10-17",
+          "Statement":[{
+            "Effect":"Allow",
+            "Principal": "*",
+            "Action":["s3:*"],
+            "Resource":["*"]
+          }]
+        },
+        "RouteTableIds" : [ {"Ref" : "VPCRouteTable"} ],
+        "ServiceName" : { "Fn::Join": [ "", [ "com.amazonaws.", { "Ref": "AWS::Region" }, ".s3" ] ] },
+        "VpcId" : { "Ref" : "SpokeVPC" }
+      }
+    },
+    "VPCPubSubnetRouteTableAssociation1" : {
+      "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "VPCPubSub1" },
+        "RouteTableId" : { "Ref" : "VPCRouteTable" }
+      }
+    },
+    "VPCPubSubnetRouteTableAssociation2" : {
+      "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "VPCPubSub2" },
+        "RouteTableId" : { "Ref" : "VPCRouteTable" }
+      }
+    },
+    "VPCPrivateSubnetRouteTableAssociation1" : {
+      "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "VPCPrivateSub1" },
+        "RouteTableId" : { "Ref" : "VPCPrivateRouteTable" }
+      }
+    },
+    "VPCPrivateSubnetRouteTableAssociation2" : {
+      "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "VPCPrivateSub2" },
+        "RouteTableId" : { "Ref" : "VPCPrivateRouteTable" }
+      }
+    },
+    
+    "CsrEip1" : {
+      "Type" : "AWS::EC2::EIP",
+      "DependsOn": "VpcCsr1",
+      "Properties" : {
+        "Domain" : "vpc"
+      }
+    },
+    "AssociateCsrEip1" : {
+      "Type" : "AWS::EC2::EIPAssociation",
+      "Properties" : {
+        "AllocationId" : { "Fn::GetAtt" : [ "CsrEip1", "AllocationId" ]},
+        "NetworkInterfaceId" : { "Ref" : "CSR1Gig1" }
+      }
+    },
+    "CsrEip2" : {
+      "Type" : "AWS::EC2::EIP",
+      "DependsOn": "VpcCsr2",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "Domain" : "vpc"
+      }
+    },
+    "AssociateCsrEip2" : {
+      "Type" : "AWS::EC2::EIPAssociation",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "AllocationId" : { "Fn::GetAtt" : [ "CsrEip2", "AllocationId" ]},
+        "NetworkInterfaceId" : { "Ref" : "CSR2Gig1" }
+      }
+    },
+
+    "CSR1Gig1" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "VPCPubSub1" },
+        "GroupSet": [{ "Ref" : "SpokeCSRSecurityGroup" }],
+        "SourceDestCheck" : "false",
+        "Description" :"Interface CSR1 for traffic",
+        "Tags" : [ {"Key" : "Name", "Value" : "Spoke CSR1 Gig1"}]
+      }
+    },
+    "CSR1Gig2" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "VPCPrivateSub1" },
+        "GroupSet": [{ "Ref" : "SpokeCSRSecurityGroup" }],
+        "SourceDestCheck" : "false",
+        "Description" :"Interface CSR1 for private traffic",
+        "Tags" : [ {"Key" : "Name", "Value" : "Spoke CSR1 Gig2"}]
+      }
+    },
+
+    "CSR2Gig1" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "VPCPubSub2" },
+        "GroupSet": [{ "Ref" : "SpokeCSRSecurityGroup" }],
+        "SourceDestCheck" : "false",
+        "Description" :"Interface CSR2 for traffic",
+        "Tags" : [ {"Key" : "Name", "Value" : "Spoke CSR2 Gig1"}]
+      }
+    },
+    "CSR2Gig2" : {
+      "Type" : "AWS::EC2::NetworkInterface",
+      "Condition" : "EnableHA",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "VPCPrivateSub2" },
+        "GroupSet": [{ "Ref" : "SpokeCSRSecurityGroup" }],
+        "SourceDestCheck" : "false",
+        "Description" :"Interface CSR2 for private traffic",
+        "Tags" : [ {"Key" : "Name", "Value" : "Spoke CSR2 Gig2"}]
+      }
+    },    
+   "GetAMIRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+         "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+               "Effect": "Allow",
+               "Principal": {
+                  "Service": ["lambda.amazonaws.com"]
+               },
+               "Action": ["sts:AssumeRole"]
+            }]
+         },
+         "Policies": [{
+            "PolicyName": "lambdalogtocloudwatch",
+            "PolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [{
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+                  "Resource": { "Fn::Join" : ["", ["arn:aws:logs:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":log-group:/aws/lambda/*" ]]}
+               },  
+                  {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": { "Fn::Join": ["", ["arn:aws:s3:::csr1000vautoscaler-", {"Ref" : "AWS::Region"},"/*"]] }
+                  }
+               ]
+            }
+         }]
+      }
+   },   
+   "GetAMILambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+         "Code": {
+            "ZipFile": {
+               "Fn::Join": ["\n", [
+              "import json",
+              "import boto3",
+              "import logging",
+              "import ast",
+              "import cfnresponse",
+              "log = logging.getLogger()",
+              "log.setLevel(logging.INFO)",
+              "def handler(event, context):",
+              "   ami_params = event['ResourceProperties']['GetAMIInfo']",
+              "   ami_info = ast.literal_eval(ami_params)",
+              "   log.info ('AMI info: {}'.format(ami_info))",
+              "   responseData = {}",
+              "   amiObject = ami_info['AMIFILE']",
+              "   print 'ami file:', amiObject",
+              "   s3 = boto3.resource('s3')",
+              "   data_file = s3.Object(event['ResourceProperties']['Bucket'], amiObject)",
+              "   data_json = data_file.get()['Body'].read().decode('utf-8')",
+              "   data = json.loads(data_json)",
+              "   print data",
+              "   responseData['AMIInfo'] = data['CiscoCsrAMI'][ami_info['REGION']][ami_info['LICENSE_MODEL']]",
+              "   log.info ('AMI: {}'.format(responseData['AMIInfo']))",
+              "   cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)"
+            ]]
+            }
+         },
+         "Handler": "index.handler",
+         "MemorySize": "128",
+         "Runtime": "python2.7",
+         "Timeout": "300",
+         "Role": {"Fn::GetAtt": ["GetAMIRole", "Arn"]}
+      }
+   },
+   "GetAMI": {
+      "Type": "Custom::LambdaCallout",
+      "Properties": {
+         "Description": "Get CSR AMI",
+         "ServiceToken": {"Fn::GetAtt": ["GetAMILambda", "Arn"]},
+         "GetAMIInfo" : { "Fn::Join": ["", [
+                "{'REGION' : '",{ "Ref" : "AWS::Region" },"', ",
+                "'LICENSE_MODEL' : '", { "Ref" : "LicenseModel" }, "', ",
+                "'AMIFILE' : 'ami.json'",
+                "}"
+         ]] },
+        "Bucket": { "Fn::Join": ["", ["csr1000vautoscaler-", {"Ref" : "AWS::Region"}]] }
+      }
+   },          
+    
+	"InstanceProfile" : {
+   		"Type": "AWS::IAM::InstanceProfile",
+   		"Properties": {
+     		 "Path": "/",
+      		 "Roles": [{ "Ref" : "ChangeRouteRole"}]
+   		}
+	},      
+    "VpcCsr1" : {
+      "Type" : "AWS::EC2::Instance",
+      "Metadata" : {
+        "Comment1" : "Launch Cisco CSR1"
+      },
+      "Properties" : {
+        "InstanceType" : { "Fn::FindInMap" : [ "CsrInstance", { "Ref" : "CSRType" }, "Type"] },
+        "KeyName" : { "Ref" : "KeyName" },
+        "DisableApiTermination" : {"Fn::If": ["EnableTerm", true, false ]},
+        "ImageId"        : {"Fn::GetAtt": ["GetAMI", "AMIInfo"]},
+        "NetworkInterfaces" : [ { "NetworkInterfaceId" : {"Ref" : "CSR1Gig1"}, "DeviceIndex" : "0" },
+								{"Fn::If": ["EnableHA", 
+          							{ "NetworkInterfaceId" : {"Ref" : "CSR1Gig2"}, "DeviceIndex" : "1"}, 
+                 					{"Ref" : "AWS::NoValue"}]}],
+
+        "Tags" : [
+          { "Key" : "Name", "Value" : { "Fn::Join": ["", [ "Spoke VPC CSR1-", { "Ref" : "AWS::StackName" }]]}}
+        ],
+        "IamInstanceProfile" : {"Ref" : "InstanceProfile"},
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+	      "ios-config-1=\"username ", { "Fn::FindInMap" : [ "Function", "Csr", "UserName"]},
+	      " priv 15 pass ", { "Fn::GetAtt" : [ "CreateRandomPassword" , "Password" ] },"\"\n",
+          "ios-config-2=\"service password-encryption\"\n",
+          "ios-config-3=\"crypto isakmp policy 200\"\n",
+          "ios-config-4=\"encryption aes 128\"\n",
+          "ios-config-5=\"authentication pre-share\"\n",
+          "ios-config-6=\"group 2\"\n",
+          "ios-config-7=\"lifetime 28800\"\n",
+          "ios-config-8=\"hash sha\"\n",
+          "ios-config-9=\"crypto ipsec transform-set ipsec-prop-vpn-aws esp-aes 128 esp-sha-hmac\"\n",
+          "ios-config-10=\"mode tunnel\"\n",
+          "ios-config-11=\"crypto ipsec df-bit clear\"\n",
+          "ios-config-12=\"crypto isakmp keepalive 10 10 on-demand\"\n",
+          "ios-config-13=\"crypto ipsec security-association replay window-size 1024\"\n",
+          "ios-config-14=\"crypto ipsec fragmentation before-encryption\"\n",
+          "ios-config-15=\"crypto ipsec profile ipsec-vpn-aws\"\n",
+          "ios-config-16=\"set pfs group2\"\n",
+          "ios-config-17=\"set security-association lifetime seconds 3600\"\n",
+          "ios-config-18=\"set transform-set ipsec-prop-vpn-aws\"\n",
+          "ios-config-19=\"router bgp 7224\"\n",
+          "ios-config-20=\"maximum-paths 32\"\n",
+	      "ios-config-21=\"bgp log-neighbor-changes\"\n",
+	      "ios-config-22=\"ip vrf vpn0\"\n",
+          "ios-config-23=\"rd 7224:0\"\n",
+	      "ios-config-24=\"ip ssh pubkey-chain\"\n",
+	      "ios-config-25=\"username ", { "Fn::FindInMap" : [ "Function", "Csr", "UserName"]}, "\"\n",
+          "ios-config-26=\"key-hash ssh-rsa ", { "Fn::GetAtt" : [ "CreateRsaKey", "Fingerprint" ] },"\"\n",
+          "ios-config-27=\"ip ssh server algorithm authentication publickey\"\n",
+          "ios-config-28=\"ip ssh maxstartups 2\"\n"
+        ]]}}
+      }
+    },
+    "VpcCsr2" : {
+      "Type" : "AWS::EC2::Instance",
+      "Condition" : "EnableHA",
+      "Metadata" : {
+        "Comment1" : "Launch Cisco CSR2"
+      },
+      "Properties" : {
+        "InstanceType" : { "Fn::FindInMap" : [ "CsrInstance", { "Ref" : "CSRType" }, "Type"] },
+        "KeyName" : { "Ref" : "KeyName" },
+        "DisableApiTermination" : {"Fn::If": ["EnableTerm", true, false ]},
+        "ImageId"        : {"Fn::GetAtt": ["GetAMI", "AMIInfo"]},
+        "NetworkInterfaces" : [ { "NetworkInterfaceId" : {"Ref" : "CSR2Gig1"}, "DeviceIndex" : "0" }, 
+          						{ "NetworkInterfaceId" : {"Ref" : "CSR2Gig2"}, "DeviceIndex" : "1" }],
+        "Tags" : [
+          { "Key" : "Name", "Value" : { "Fn::Join": ["", [ "Spoke VPC CSR2-", { "Ref" : "AWS::StackName" }]]}}
+        ],
+        "IamInstanceProfile" : { "Ref" : "InstanceProfile"},
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+	      "ios-config-1=\"username ", { "Fn::FindInMap" : [ "Function", "Csr", "UserName"]},
+	  " priv 15 pass ", { "Fn::GetAtt" : [ "CreateRandomPassword" , "Password" ] },"\"\n",
+	      "ios-config-2=\"service password-encryption\"\n",
+	      "ios-config-3=\"crypto isakmp policy 200\"\n",
+  	      "ios-config-4=\"encryption aes 128\"\n",
+  	      "ios-config-5=\"authentication pre-share\"\n",
+	      "ios-config-6=\"group 2\"\n",
+  	      "ios-config-7=\"lifetime 28800\"\n",
+  	      "ios-config-8=\"hash sha\"\n",
+          "ios-config-9=\"crypto ipsec transform-set ipsec-prop-vpn-aws esp-aes 128 esp-sha-hmac\"\n",
+          "ios-config-10=\"mode tunnel\"\n",
+          "ios-config-11=\"crypto ipsec df-bit clear\"\n",
+          "ios-config-12=\"crypto isakmp keepalive 10 10 on-demand\"\n",
+          "ios-config-13=\"crypto ipsec security-association replay window-size 1024\"\n",
+          "ios-config-14=\"crypto ipsec fragmentation before-encryption\"\n",
+          "ios-config-15=\"crypto ipsec profile ipsec-vpn-aws\"\n",
+          "ios-config-16=\"set pfs group2\"\n",
+          "ios-config-17=\"set security-association lifetime seconds 3600\"\n",
+          "ios-config-18=\"set transform-set ipsec-prop-vpn-aws\"\n",
+          "ios-config-19=\"router bgp 7224\"\n",
+          "ios-config-20=\"maximum-paths 32\"\n",
+          "ios-config-21=\"bgp log-neighbor-changes\"\n",
+	      "ios-config-22=\"ip vrf vpn0\"\n",
+          "ios-config-23=\"rd 7224:0\"\n",
+          "ios-config-24=\"ip ssh pubkey-chain\"\n",
+          "ios-config-25=\"username ", { "Fn::FindInMap" : [ "Function", "Csr", "UserName"]}, "\"\n",
+          "ios-config-26=\"key-hash ssh-rsa ", { "Fn::GetAtt" : [ "CreateRsaKey", "Fingerprint" ] },"\"\n",
+          "ios-config-27=\"ip ssh server algorithm authentication publickey\"\n",
+          "ios-config-28=\"ip ssh maxstartups 2\"\n"
+        ]]}}
+      }
+    },
+    "SpokeSolutionHelperRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version" : "2012-10-17",
+          "Statement": [ {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          } ]
+        },
+        "Path": "/"
+      }
+   },
+   "SpokeSolutionHelperRolePolicy" : {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+          "Roles" : [ { "Ref" : "SpokeSolutionHelperRole" } ],
+          "PolicyName": "Solution_Helper_Permissions",
+          "PolicyDocument": {
+              "Version" : "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": { "Fn::Join" : ["", ["arn:aws:logs:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":log-group:/aws/lambda/*" ]]}
+                },
+		{
+		   "Effect": "Allow",
+		   "Action": [
+		  	"kms:Encrypt",
+		  	"kms:Decrypt",
+		  	"kms:ReEncrypt*",
+		  	"kms:GenerateDataKey*",
+		  	"kms:DescribeKey"
+		    ],
+		    "Resource": "*"
+		},
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutBucketNotification"
+                  ],
+                  "Resource": { "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" } ]] }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "sns:Publish",
+                    "sns:Subscribe"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "lambda:*",
+                    "events:*",
+                    "ec2:DescribeSecurityGroups",
+                    "ec2:DescribeSubnets",
+                    "ec2:DescribeInternetGateways",
+                    "ec2:DeleteInternetGateway",
+                    "ec2:AttachInternetGateway",
+                    "ec2:CreateInternetGateway",
+                    "ec2:DetachInternetGateway",
+                    "ec2:CreateTags",
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeInstanceStatus",
+                    "ec2:TerminateInstances",
+                    "ec2:DescribeVpcs"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:PassRole"
+                  ],
+                  "Resource": [{ "Fn::GetAtt" : [ "SpokeConfigFunctionRole", "Arn" ]},
+                               { "Fn::GetAtt" : [ "SpokeBrokerRole", "Arn" ] }]
+                },
+                {
+                "Effect": "Allow",
+                "Action": [
+                          "s3:PutObject",
+                          "s3:PutObjectAcl",
+                          "s3:DeleteObject",
+                          "s3:GetObject"
+                ],
+                "Resource": [
+                              { "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "TransitVPCS3Bucket" }, "/", {"Ref": "S3Prefix"}, "*" 	]] },
+                              { "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" }, "/", {"Ref": "S3Prefix"}, "*" 	]] }
+                             ]
+	            },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": "arn:aws:s3:::*"
+                }
+             ]
+        }
+      }
+    },
+   "WaitForRoleLambdaExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+         "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+               "Effect": "Allow",
+               "Principal": {
+                  "Service": ["lambda.amazonaws.com"]
+               },
+               "Action": ["sts:AssumeRole"]
+            }]
+         },
+         "Policies": [{
+            "PolicyName": "LambdaCloudWatch",
+            "PolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [{
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+                  "Resource": { "Fn::Join" : ["", ["arn:aws:logs:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":log-group:/aws/lambda/*" ]]}
+               }
+             ]
+            }
+         }]
+      }
+   },   
+   "WaitLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+         "Code": {
+            "ZipFile": {
+               "Fn::Join": ["\n", [
+               "import time",
+               "import cfnresponse",
+               "def handler(event, context):",
+               "   time.sleep(20)", 
+               "   responseData = {}",
+               "   cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)"
+               ]]
+            }
+         },
+         "Handler": "index.handler",
+         "MemorySize": "128",
+         "Runtime": "python2.7",
+         "Timeout": "300",
+         "Role": {"Fn::GetAtt" : ["WaitForRoleLambdaExecutionRole", "Arn"]}
+      }
+   },
+   "WaitForRole": {
+      "Type": "Custom::LambdaCallout",
+      "DependsOn" : "SpokeSolutionHelperRolePolicy",
+      "Properties": {
+         "Description": "Sleep timer waiting for role propagation completion",
+         "ServiceToken": {"Fn::GetAtt": ["WaitLambda", "Arn"]}
+      }
+   },
+    "SpokeSqsQueue" : {
+      "Type" : "AWS::SQS::Queue",
+      "Properties" : {
+        "QueueName" : { "Fn::Join": ["", ["sqsQueue-", {"Ref" : "AWS::StackName"} ]] },
+        "DelaySeconds": 0,
+        "VisibilityTimeout": 0
+      }
+    },
+    
+    "SpokeSqsQueuePolicy" : {
+      "Type" : "AWS::SQS::QueuePolicy",
+      "Properties" : {
+        "PolicyDocument" : {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Action": [
+                "SQS:SendMessage"
+              ],
+              "Effect": "Allow",
+              "Principal": "*",
+              "Resource": {"Fn::GetAtt" : ["SpokeSqsQueue", "Arn"]},
+              "Condition": {
+                "ArnLike": {
+                  "aws:SourceArn": { "Fn::Join": ["", ["arn:aws:s3:*:*:", { "Ref" : "VPNConfigS3Bucket" } ]] }
+                }
+              }
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "SQS:DeleteMessage",
+                "SQS:ReceiveMessage"
+              ],
+              "Principal": "*",
+              "Resource": {"Fn::GetAtt" : ["SpokeSqsQueue", "Arn"]},
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceArn": { "Fn::Join": ["", ["arn:aws:lambda:", {"Ref" : "AWS::Region"}, ":", {"Ref" : "AWS::AccountId"} ,":", "sqs-events-poller-", {"Ref" : "AWS::StackName"} ]] }
+                }
+              }
+            }
+          ]
+        },
+        "Queues" : [ {"Ref" : "SpokeSqsQueue"} ]
+      }
+    },
+    
+    "SqsEventsPollerLambdaExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{ "Effect": "Allow", "Principal": {"Service": ["lambda.amazonaws.com"]}, "Action": ["sts:AssumeRole"] }]
+        },
+        "Path": "/",
+        "Policies": [{
+          "PolicyName": "root",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "lambda:InvokeFunction"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "sqs:DeleteMessage",
+                  "sqs:ReceiveMessage",
+                  "sqs:ChangeMessageVisibility",
+                  "sqs:GetQueueAttributes"
+                ],
+                "Resource": {"Fn::GetAtt" : ["SpokeSqsQueue", "Arn"]}
+              },
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "logs:CreateLogGroup",
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents"
+                ],
+                "Resource": { "Fn::Join" : ["", ["arn:aws:logs:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":log-group:/aws/lambda/*" ]]}
+              },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:DescribeKey"
+              ],
+              "Resource": { "Fn::Join" : ["", ["arn:aws:kms:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":key/", { "Ref" : "KMSKey" } ]]}
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:GetBucketPolicy",
+                "s3:PutBucketPolicy"
+              ],
+              "Resource": { "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" }, "/", {"Ref": "S3Prefix"}, "*" ]] }
+            }
+            ]
+          }}]}},
+    
+          "SpokeSqsPollerLambda": {
+            "Type": "AWS::Lambda::Function",
+            "DependsOn" : ["SpokeSqsQueue", "SpokeSqsQueuePolicy", "SpokeConfigFunct"],
+            "Properties": {
+              "Handler": "sqs_events_poller_spoke.lambda_handler",
+              "FunctionName" : { "Fn::Join": ["", ["sqs-events-poller-", {"Ref" : "AWS::StackName"} ]] },
+              "Role": {
+                "Fn::GetAtt": [
+                  "SqsEventsPollerLambdaExecutionRole",
+                  "Arn"
+                ]
+              },
+              "Code": {
+                "S3Bucket": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "csr1000vautoscaler-",
+                      {
+                        "Ref": "AWS::Region"
+                      }
+                    ]
+                  ]
+                },
+                "S3Key": {
+                  "Fn::Join": [
+                    "/",
+                    [
+                      {
+                        "Fn::FindInMap": [
+                          "BucketVersion",
+                          "released",
+                          "Version"
+                        ]
+                      },
+                      "sqs_events_poller_spoke.zip"
+                    ]
+                  ]
+                }
+              },
+              "Runtime": "python2.7",
+              "Timeout": "300",
+              "MemorySize": "512",
+              "Environment": {
+                "Variables": {
+                  "SQS_QUEUE_URL": {
+                    "Ref": "SpokeSqsQueue"
+                  },
+                  "BUCKET_NAME": {
+                    "Ref": "VPNConfigS3Bucket"
+                  },
+                  "BUCKET_PREFIX": {
+                    "Ref": "S3Prefix"
+                  },
+                  "LAMBDA_NAME": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        {
+                          "Ref": "AWS::StackName"
+                        },
+                        "-",
+                        {
+                          "Fn::FindInMap": [
+                            "Function",
+                            "Configurator",
+                            "Name"
+                          ]
+                        }
+                      ]
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "ScheduledCWRuleSqsPoller": {
+            "Type": "AWS::Events::Rule",
+            "Properties": {
+              "Description": "Scheduled Cloudwatch Event Rule",
+              "ScheduleExpression": "rate(1 minute)",
+              "State": "ENABLED",
+              "Targets": [{
+                "Arn": { "Fn::GetAtt": ["SpokeSqsPollerLambda", "Arn"] },
+                "Id": "SpokeSqsPollerLambda"
+              }]
+            }
+          },
+          "PermissionForEventsToInvokeSqsLambda": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+              "FunctionName": { "Ref": "SpokeSqsPollerLambda" },
+              "Action": "lambda:InvokeFunction",
+              "Principal": "events.amazonaws.com",
+              "SourceArn": { "Fn::GetAtt": ["ScheduledCWRuleSqsPoller", "Arn"] }
+            }
+          },
+          
+    "SpokeSolutionHelper": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn" : "WaitForRole",
+      "Properties": {
+        "Handler": "spoke-solution-helper.lambda_handler",
+        "Role": { "Fn::GetAtt" : [ "SpokeSolutionHelperRole" , "Arn" ] },
+        "Description": "Spoke VPC: CloudFormation custom resource function invoked during spoke VPC CloudFormation create, update, and delete stack operations.",
+        "Code": {
+          "S3Bucket": { "Fn::Join": ["", ["csr1000vautoscaler-", {"Ref" : "AWS::Region"}]] },
+          "S3Key": {"Fn::Join": ["/",[
+           { "Fn::FindInMap" : [ "BucketVersion", "released", "Version"] },
+            "spoke-solution-helper.zip"]]
+          }
+        },
+        "Runtime": "python2.7",
+        "Timeout": "300"
+     }
+    },
+    "CreateRsaKey": {
+     "Type": "Custom::LoadLambda",
+     "Properties": {
+       "ServiceToken": { "Fn::GetAtt" : ["SpokeSolutionHelper", "Arn"] },
+       "Region": { "Ref": "AWS::Region" },
+       "CreateSshKey" : { "Fn::Join": ["", [
+                "{ 'Bucket' : '",{ "Ref" : "VPNConfigS3Bucket" },"', ",
+                "'SSEKMSKeyId' : 'arn:aws:kms:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":key/", { "Ref" : "KMSKey" }, "', ",
+                "'PrivateKey' : '", { "Ref" : "S3Prefix" }, { "Fn::FindInMap" : [ "Function", "Csr", "PrivateKey"]}, "', ",
+                "'PublicKey' : '", { "Ref" : "S3Prefix" }, { "Fn::FindInMap" : [ "Function", "Csr", "PublicKey"]}, "' ",
+                "}"
+        ]] }
+     }
+   },
+   "FindSubnetAndGateway": {
+     "Type": "Custom::LoadLambda",
+     "Properties": {
+       "ServiceToken": { "Fn::GetAtt" : ["SpokeSolutionHelper", "Arn"] },
+       "Region": { "Ref": "AWS::Region" },
+       "FindSubnetAndGateway" : { "Fn::Join": ["", [
+                "{'Region' : '",{ "Ref" : "AWS::Region" },"', ",
+                "'STACK_NAME' : '", { "Ref" : "AWS::StackName" },"',",
+                "'VPCId' : '", {"Ref" : "SpokeVPC" }, "' ",
+                "}"
+        ]] }
+     }
+   },      
+   "CreateRandomPassword": {
+     "Type": "Custom::LoadLambda",
+     "Properties": {
+       "ServiceToken": { "Fn::GetAtt" : ["SpokeSolutionHelper", "Arn"] },
+       "Region": { "Ref": "AWS::Region" },
+       "CreateRandomPassword" : { "Fn::FindInMap" : [ "Function", "Csr", "PasswordLength"]},
+       "RandomPasswordSpecialCharacters": "False"
+     }
+   },
+   "SpokeConfigFunctionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version" : "2012-10-17",
+          "Statement": [ {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          } ]
+        },
+        "Path": "/"
+      }
+   },
+    "SpokeConfigFunctionRolePolicy" : {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+          "Roles" : [ { "Ref" : "SpokeConfigFunctionRole" } ],
+          "PolicyName": "Cisco_Config_Permissions",
+          "PolicyDocument": {
+            "Version" : "2012-10-17",
+            "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": { "Fn::Join" : ["", ["arn:aws:logs:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":log-group:/aws/lambda/*" ]]}
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:CreateNetworkInterface",
+                    "ec2:DescribeNetworkInterfaces",
+                    "ec2:DetachNetworkInterface",
+                    "ec2:DeleteNetworkInterface"
+                  ],
+                  "Resource": "*"
+                },
+		{
+		    "Effect": "Allow",
+		        "Action": [
+		            "kms:Encrypt",
+		    	    "kms:Decrypt",
+		    	    "kms:ReEncrypt*",
+		    	    "kms:GenerateDataKey*",
+		    	    "kms:DescribeKey"
+		  	],
+		  	"Resource": { "Fn::Join" : ["", ["arn:aws:kms:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":key/", { "Ref" : "KMSKey" } ]]}
+		},
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:GetObject"
+                  ],
+                  "Resource": { "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" }, "/", {"Ref": "S3Prefix"}, "*" ]] }
+                }
+             ]
+        }
+      }
+   },
+   "SpokeConfigFunct": {
+     "Type": "Custom::LoadLambda",
+     "DependsOn":["SpokeConfigSecurityGroup"],
+     "Properties": {
+       "ServiceToken": { "Fn::GetAtt" : ["SpokeSolutionHelper", "Arn"] },
+       "Region": { "Ref": "AWS::Region" },
+       "LambdaCode": {"Fn::Join": ["",[
+           "csr1000vautoscaler-",
+           {"Ref" : "AWS::Region"}, "/",
+           { "Fn::FindInMap" : [ "BucketVersion", "released", "Version"] },
+            "/spoke-configurator.zip"]]
+          },
+       "LambdaCodeRegion": { "Fn::FindInMap" : [ "Function", "Configurator", "CodeRegion"]},
+       "FunctionName": { "Fn::Join": ["", [ { "Ref" : "AWS::StackName" }, "-", { "Fn::FindInMap" : [ "Function", "Configurator", "Name"]}       ]] },
+       "Role": { "Fn::GetAtt" : [ "SpokeConfigFunctionRole", "Arn" ] },
+       "Runtime": { "Fn::FindInMap" : [ "Function", "Configurator", "Runtime"]},
+       "Description": { "Fn::FindInMap" : [ "Function", "Configurator", "Description"]},
+       "Timeout": { "Fn::FindInMap" : [ "Function", "Configurator", "Timeout"]},
+       "MemorySize": { "Fn::FindInMap" : [ "Function", "Configurator", "MemorySize"]},
+       "VpcConfig" : { "Fn::Join": ["", [
+                "{ 'SubnetIds': [",
+                     "'",{ "Ref" : "VPCPubSub1" }, "'",
+                    { "Fn::If" : [
+                       "EnableHA",
+                       {"Fn::Join" : ["",
+                        [",'",
+                         {"Ref" : "VPCPubSub2"},
+                         "'"] ] },
+                       ""]
+                    },
+                     "],",
+                "'SecurityGroupIds': [",
+                    "'",{ "Ref" : "SpokeConfigSecurityGroup" }, "']",
+                "}"
+        ]] },
+        "StoreInS3KMS" : { "Fn::Join": ["", [
+                "[{ 'Bucket' : '",{ "Ref" : "VPNConfigS3Bucket" },"', ",
+                "'Key' : '", { "Ref" : "S3Prefix" }, "spoke_vpc_config.txt', ",
+                "'SSEKMSKeyId' : 'arn:aws:kms:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":key/", { "Ref" : "KMSKey" }, "', ",
+                "'Body': \"{",
+                    "'UUID':'",{"Fn::GetAtt": [ "CreateUniqueID", "UUID" ] },"',",
+                    "'SENDDATA':'",{"Ref" : "SendAnonymousData"},"',",
+                    "'EIP1':'",{ "Ref" : "CsrEip1" },"',",
+                    "'EIP2':'",{ "Fn::If" : ["EnableHA", { "Ref" : "CsrEip2"} , ""]},"',",
+                    "'PRV_ENI1':'",{ "Fn::If" : ["EnableHA", { "Ref" : "CSR1Gig2"} , ""]},"',",
+                    "'PRV_ENI2':'",{ "Fn::If" : ["EnableHA", { "Ref" : "CSR2Gig2"} , ""]},"',",
+                    "'REGION':'",{"Ref" : "AWS::Region"},"',",
+                    "'SPOKE_NETWORK_ADDR':'",{ "Fn::GetAtt" : ["FindSubnetAndGateway", "CIDRNetwork"]},"',",
+                    "'SPOKE_NETWORK_MASK':'",{ "Fn::GetAtt" : ["FindSubnetAndGateway", "CIDRMask"]},"',",
+          
+                    "'SPOKE_CSR1_PUB_NETWORK_ADDR':'",{ "Fn::GetAtt" : ["FindSubnetAndGateway", "AutoPubSubnet1NetAddr"]},"',",
+                    "'SPOKE_CSR1_PRV_NETWORK_ADDR':'",{ "Fn::If" : ["EnableHA", { "Fn::GetAtt" : ["FindSubnetAndGateway", "AutoPrivateSubnet1NetAddr"]} , ""]},"',",
+                    "'SPOKE_CSR2_PUB_NETWORK_ADDR':'",{ "Fn::If" : ["EnableHA", { "Fn::GetAtt" : ["FindSubnetAndGateway", "AutoPubSubnet2NetAddr"]} , ""]},"',",
+                    "'SPOKE_CSR2_PRV_NETWORK_ADDR':'",{ "Fn::If" : ["EnableHA", { "Fn::GetAtt" : ["FindSubnetAndGateway", "AutoPrivateSubnet2NetAddr"]} , ""]},"',",
+                    
+                    "'SPOKE_CSR1_PUB_NETWORK_MASK':'",{ "Fn::GetAtt" : ["FindSubnetAndGateway", "AutoPubSub1Mask"]},"',",
+                    "'SPOKE_CSR1_PRV_NETWORK_MASK':'",{ "Fn::If" : ["EnableHA", { "Fn::GetAtt" : ["FindSubnetAndGateway", "AutoPriSub1Mask"]} , ""]},"',",
+                    "'SPOKE_CSR2_PUB_NETWORK_MASK':'",{ "Fn::If" : ["EnableHA", { "Fn::GetAtt" : ["FindSubnetAndGateway", "AutoPubSub2Mask"]} , ""]},"',",
+                    "'SPOKE_CSR2_PRV_NETWORK_MASK':'",{ "Fn::If" : ["EnableHA", { "Fn::GetAtt" : ["FindSubnetAndGateway", "AutoPriSub2Mask"]} , ""]},"',",
+          
+                    "'ROUTED_PRI_SUBNET_CIDR': '0.0.0.0/0',",
+                    "'ROUTE_TABLE':'",{ "Fn::If" : ["EnableHA", { "Ref" : "VPCPrivateRouteTable"} , ""]},"',",
+                    "'HA_ENABLE':'",{ "Fn::If" : ["EnableHA", "TRUE" , "FALSE"]},"',",
+                    "'PIP1':'",{ "Fn::GetAtt" : [ "VpcCsr1", "PrivateIp" ] },"',",
+                    "'PIP2':'",{ "Fn::If" : ["EnableHA", { "Fn::GetAtt" : [ "VpcCsr2", "PrivateIp" ] }, ""]},"',",
+                    "'BGP_ASN': '7224',",
+                    "'USER_NAME':'",{ "Fn::FindInMap" : [ "Function", "Csr", "UserName"]},"',",
+                    "'PRIVATE_KEY':'",{ "Fn::FindInMap" : [ "Function", "Csr", "PrivateKey"]},"',",
+                    "'PUBLIC_KEY':'",{ "Fn::GetAtt" : [ "CreateRsaKey", "PubKey" ] },"',",
+                    "'PASSWORD':'",{ "Fn::GetAtt" : [ "CreateRandomPassword" , "Password" ] },"',",
+                    "'CSR1InstanceID':'",{ "Ref" : "VpcCsr1" },"',",
+                    "'CSR2InstanceID':'",{ "Fn::If" : ["EnableHA", { "Ref" : "VpcCsr2"} , ""]},"',",
+                    "'TRANSIT_PREFER_PATH':'",{ "Ref" : "TransitPreferPath" },"',",
+                    "'KMS_KEY':'arn:aws:kms:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":key/", { "Ref" : "KMSKey" },"'",
+                    "}\"",
+                "}]"
+        ]] }
+      }
+    },
+    
+   "CheckInstancesLambdaExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+         "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+               "Effect": "Allow",
+               "Principal": {
+                  "Service": ["lambda.amazonaws.com"]
+               },
+               "Action": ["sts:AssumeRole"]
+            }]
+         },
+         "Policies": [{
+            "PolicyName": "lambdalogtocloudwatch",
+            "PolicyDocument": {
+               "Version": "2012-10-17",
+               "Statement": [{
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+                  "Resource": { "Fn::Join" : ["", ["arn:aws:logs:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":log-group:/aws/lambda/*" ]]}
+               },  
+                  {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutBucketNotification",
+                    "s3:GetBucketPolicy",
+                    "s3:PutBucketPolicy"
+                  ],
+                  "Resource": { "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" } ]] }
+                  },
+                  {
+                  "Effect": "Allow",
+                  "Action": [
+                     "kms:GetKeyPolicy",
+                     "kms:PutKeyPolicy",
+                     "ec2:*"
+                  ],
+                  "Resource": "*"
+                  }
+               ]
+            }
+         }]
+      }
+   },   
+   "CheckInstancesLambda": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+         "Code": {
+            "ZipFile": {
+               "Fn::Join": ["\n", [
+               "import json",
+               "import boto3",
+               "import logging",
+               "import ast",
+               "import cfnresponse",
+               "log = logging.getLogger()",
+               "log.setLevel(logging.INFO)",
+               "def check_instance_status(CSR1InstanceID, CSR2InstanceID):",
+               "    ec2_client = boto3.client('ec2')",
+               "    ec2_res = boto3.resource('ec2') ",
+               "    ec2_client_system_status_ok = ec2_client.get_waiter('system_status_ok')",
+               "    ec2_client_instance_status_ok = ec2_client.get_waiter('instance_status_ok')",
+               "    if CSR1InstanceID != '':",
+               "        instance = ec2_res.Instance(CSR1InstanceID)",
+               "        instance_status = instance.state['Name']",
+               "        log.info ('CSR1 instance status {}'.format(instance_status))",
+               "        if instance_status == 'running' or instance_status == 'pending':",
+               "            ec2_client_system_status_ok.wait(InstanceIds = [CSR1InstanceID], Filters=[{'Name': 'system-status.reachability', 'Values': ['passed']}])",
+               "            ec2_client_instance_status_ok.wait(InstanceIds = [CSR1InstanceID], Filters=[{'Name': 'instance-status.reachability', 'Values': ['passed']}])",
+               "    if CSR2InstanceID != '':",
+               "        instance = ec2_res.Instance(CSR2InstanceID)",
+               "        instance_status = instance.state['Name']",
+               "        log.info ('CSR1 instance status {}'.format(instance_status))",
+               "        if instance_status == 'running' or instance_status == 'pending':",
+               "            ec2_client_system_status_ok.wait(InstanceIds = [CSR2InstanceID], Filters=[{'Name': 'system-status.reachability', 'Values': ['passed']}])",
+               "            ec2_client_instance_status_ok.wait(InstanceIds = [CSR2InstanceID], Filters=[{'Name': 'instance-status.reachability', 'Values': ['passed']}])", 
+               "    return 'UP'",
+               "def handler(event, context):",
+               "   check_instances_params = event['ResourceProperties']['CheckInstancesCSR']",
+               "   csrs = ast.literal_eval(check_instances_params)",
+               "   responseData = {}",
+               "   responseData['InstancesStatus'] = check_instance_status(csrs['CSR1'], csrs['CSR2'])",
+               "   cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)"
+               ]]
+            }
+         },
+         "Handler": "index.handler",
+         "MemorySize": "128",
+         "Runtime": "python2.7",
+         "Timeout": "300",
+         "Role": {"Fn::GetAtt": ["CheckInstancesLambdaExecutionRole", "Arn"]}
+      }
+   },
+   "CheckInstancesCSR": {
+      "Type": "Custom::LambdaCallout",
+      "Properties": {
+         "Description": "Check CSR intances reacheability",
+         "ServiceToken": {"Fn::GetAtt": ["CheckInstancesLambda", "Arn"]},
+         "CheckInstancesCSR" : { "Fn::Join": ["", [
+                "{'CSR1' : '",{ "Ref" : "VpcCsr1" },"', ",
+                "'CSR2' : '", { "Fn::If" : ["EnableHA", { "Ref" : "VpcCsr2"},""]}, "' ",
+                "}"
+         ]] }
+      }
+   },          
+    
+    "SpokeBrokerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version" : "2012-10-17",
+          "Statement": [ {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "Path": "/"
+      }
+    },
+    "SpokeBrokerRolePolicy" : {
+      "Type": "AWS::IAM::Policy",
+      "DependsOn" : "CheckInstancesCSR",
+      "Properties": {
+	  "Roles" : [ { "Ref" : "SpokeBrokerRole" } ],
+          "PolicyName": "Spoke_Broker_Function_Permissions",
+          "PolicyDocument": {
+              "Version" : "2012-10-17",
+	      "Statement": [
+		{
+		  "Effect": "Allow",
+		  "Action": [
+		    "logs:CreateLogGroup",
+		    "logs:CreateLogStream",
+		    "logs:PutLogEvents"
+		  ],
+		  "Resource": { "Fn::Join" : ["", ["arn:aws:logs:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":log-group:/aws/lambda/*" ]]}
+		},
+		{
+		  "Effect": "Allow",
+		  "Action": [
+                    "ec2:Describe*",
+                    "ec2:CreateTags",
+                    "ec2:CreateCustomerGateway",
+                    "ec2:DeleteCustomerGateway",
+                    "ec2:CreateVpnConnection",
+                    "ec2:DeleteVpnConnection"
+		  ],
+		  "Resource": "*"
+		},
+		{
+		  "Effect": "Allow",
+		  "Action": [
+		    "kms:Encrypt",
+		    "kms:Decrypt",
+		    "kms:ReEncrypt*",
+		    "kms:GenerateDataKey*",
+		    "kms:DescribeKey"
+		  ],
+		  "Resource": "*"
+		},
+		{
+		  "Effect": "Allow",
+		  "Action": [
+                    "s3:PutObject",
+                    "s3:PutObjectAcl",
+                    "s3:DeleteObject",
+                    "s3:GetObject"
+		  ],
+		  "Resource": [
+      					{ "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "TransitVPCS3Bucket" }, "/", {"Ref": "S3Prefix"}, "*" 	]] },
+    				  	{ "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" }, "/", {"Ref": "S3Prefix"}, "*" 	]] }
+          			   ]
+	       }
+	     ]
+        }
+      } 
+    },  
+   "WaitForSpokeBrokerRole": {
+      "Type": "Custom::LambdaCallout",
+      "DependsOn" : "SpokeBrokerRolePolicy",
+      "Properties": {
+         "Description": "Sleep timer waiting for role propagation completion",
+         "ServiceToken": {"Fn::GetAtt": ["WaitLambda", "Arn"]}
+      }
+   },              
+      
+   "SpokeBrokerFunct": {
+     "Type": "Custom::LoadLambda",
+     "DependsOn": "WaitForSpokeBrokerRole",
+     "Properties": {
+       "ServiceToken": { "Fn::GetAtt" : ["SpokeSolutionHelper", "Arn"] },
+       "Region": { "Ref": "AWS::Region" },
+       "LambdaCode": {"Fn::Join": ["",[
+         "csr1000vautoscaler-",
+         {"Ref" : "AWS::Region"},"/",
+           { "Fn::FindInMap" : [ "BucketVersion", "released", "Version"] },
+            "/spoke-broker.py"]]
+          },
+       "LambdaCodeRegion": { "Fn::FindInMap" : [ "Function", "SpokeBroker", "CodeRegion"]},
+       "Deliminator": { "Fn::FindInMap" : [ "Function", "FindReplace", "Deliminator"]},
+       "FunctionName": { "Fn::Join": ["", [ { "Ref" : "AWS::StackName" }, "-", { "Fn::FindInMap" : [ "Function", "SpokeBroker", "Name"]} ]] },
+	   "Role": { "Fn::GetAtt" : [ "SpokeBrokerRole" , "Arn" ] },
+       "Runtime": { "Fn::FindInMap" : [ "Function", "SpokeBroker", "Runtime"]},
+       "Description": { "Fn::FindInMap" : [ "Function", "SpokeBroker", "Description"]},
+       "Timeout": { "Fn::FindInMap" : [ "Function", "SpokeBroker", "Timeout"]},
+       "MemorySize": { "Fn::FindInMap" : [ "Function", "SpokeBroker", "MemorySize"]},
+       "CloudWatchEvent" : { "Fn::Join": ["", [
+		"{ 'RuleName' : '",{ "Ref" : "AWS::StackName" },"-instance-state-change',", 
+        "'EventPattern': {'source': ['aws.ec2'], 'detail-type': ['EC2 Instance State-change Notification'], 'detail': {'state': ['terminated'], 'instance-id': ['", { "Fn::If" : ["EnableHA", {"Fn::Join" : ["", [{ "Ref" : "VpcCsr2"}, "', '", { "Ref" : "VpcCsr1"}]]}, { "Ref" : "VpcCsr1"}]},"']}},",
+		    "'Description': 'Spoke VPC: Rule to trigger an event when an instance is terminated.' }"
+	   ]] },
+       "SNSEvent" : { "Fn::Join": ["", [
+                "{ 'Bucket' : '",{ "Ref" : "TransitVPCS3Bucket" },"', ",
+                " 'Prefix' : '",{ "Ref" : "S3Prefix" } ,"'}"
+        ]] },
+       "FindReplace" : { "Fn::Join": ["", [
+		{ "Fn::FindInMap" : [ "Function", "FindReplace", "TVPCS3BucketID"]},
+		{ "Fn::FindInMap" : [ "Function", "FindReplace", "Deliminator"]},
+		{ "Ref" : "TransitVPCS3Bucket" },",",
+		{ "Fn::FindInMap" : [ "Function", "FindReplace", "TVPCS3PrefixID"]},
+		{ "Fn::FindInMap" : [ "Function", "FindReplace", "Deliminator"]},
+		{ "Ref" : "S3Prefix"},",",
+  		{ "Fn::FindInMap" : [ "Function", "FindReplace", "SpokeVPCID"]},
+		{ "Fn::FindInMap" : [ "Function", "FindReplace", "Deliminator"]},
+		{ "Ref" : "SpokeVPC" },",",
+    	{ "Fn::FindInMap" : [ "Function", "FindReplace", "SpokeRegion"]},
+		{ "Fn::FindInMap" : [ "Function", "FindReplace", "Deliminator"]},
+		{ "Ref" : "AWS::Region"},",",
+		{ "Fn::FindInMap" : [ "Function", "FindReplace", "SpokeS3BucketID"]},
+		{ "Fn::FindInMap" : [ "Function", "FindReplace", "Deliminator"]},
+		{ "Ref" : "VPNConfigS3Bucket"},",",
+  		{ "Fn::FindInMap" : [ "Function", "FindReplace", "SpokeS3PrefixID"]},
+		{ "Fn::FindInMap" : [ "Function", "FindReplace", "Deliminator"]},
+		{ "Ref" : "S3Prefix"}
+	]] }
+
+     }
+  },
+    "SpokeCSRSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Spoke CSR Security Group Rules",
+        "VpcId" : { "Ref" : "SpokeVPC" },
+        "SecurityGroupIngress" : [
+           { "IpProtocol" : "tcp", "FromPort" : "22",  "ToPort" : "22",  "CidrIp" : "0.0.0.0/0" }
+	],
+        "SecurityGroupEgress" : [
+           { "IpProtocol" : "-1", "FromPort" : "0", "ToPort" : "65535", "CidrIp" : "0.0.0.0/0" } ]
+      }
+    },
+    "SpokeConfigSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Spoke VPC Automation Security Group Rules",
+        "VpcId" : { "Ref" : "SpokeVPC" },
+        "SecurityGroupEgress" : [{ "IpProtocol" : "tcp", "FromPort" : "443", "ToPort" : "443", "CidrIp" : "0.0.0.0/0" },
+        { "IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : "0.0.0.0/0" }
+        ]
+      }
+    },
+    "CSR1RecoveryAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Trigger a recovery when CSR1 instance status check fails for 15 consecutive minutes.",
+        "Namespace": "AWS/EC2" ,
+        "MetricName": "StatusCheckFailed_System",
+        "Statistic": "Minimum",
+        "Period": "60",
+        "EvaluationPeriods": "15",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Threshold": "0",
+        "AlarmActions": [ {"Fn::Join" : ["", ["arn:aws:automate:", { "Ref" : "AWS::Region" }, ":ec2:recover" ]]} ],
+        "Dimensions": [{"Name": "InstanceId","Value": {"Ref": "VpcCsr1"}}]
+      }
+    },
+    "CSR2RecoveryAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Condition" : "EnableHA",
+      "Properties": {
+        "AlarmDescription": "Trigger a recovery when CSR2 instance status check fails for 15 consecutive minutes.",
+        "Namespace": "AWS/EC2" ,
+        "MetricName": "StatusCheckFailed_System",
+        "Statistic": "Minimum",
+        "Period": "60",
+        "EvaluationPeriods": "15",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Threshold": "0",
+        "AlarmActions": [ {"Fn::Join" : ["", ["arn:aws:automate:", { "Ref" : "AWS::Region" }, ":ec2:recover" ]]} ],
+        "Dimensions": [{"Name": "InstanceId","Value": {"Ref": "VpcCsr2"}}]
+      }
+    },
+    "CreateUniqueID": {
+         "Type": "Custom::LoadLambda",
+         "Properties": {
+             "ServiceToken": { "Fn::GetAtt": ["SpokeSolutionHelper", "Arn"] },
+             "Region": { "Ref": "AWS::Region" },
+             "CreateUniqueID": "true"
+         }
+    },
+    "SendingData": {
+        "Type": "Custom::LoadLambda",
+        "Condition" : "SendData",
+        "Properties": {
+            "ServiceToken": { "Fn::GetAtt": ["SpokeSolutionHelper", "Arn"] },
+            "SendAnonymousData": { "Fn::Join": ["", [
+                "{ 'Solution' : '", "SO0001", "', ",
+                  "'UUID' : '", {"Fn::GetAtt": ["CreateUniqueID", "UUID"]}, "', ",
+                  "'Data': {", "'CSRType': '", {"Ref": "CSRType"}, "',",
+                               "'LicenseModel': '", {"Ref": "LicenseModel"}, "'",
+                          "}",
+                "}"
+              ]]
+            }
+        }
+    },
+    "CustomResource": {
+      "Type": "Custom::CustomResource",
+      "Properties": {
+        "ServiceToken": { "Fn::GetAtt": ["ClearS3Lambda", "Arn"] },
+        "buckName": {"Ref": "VPNConfigS3Bucket"}
+      }
+    },
+    "ClearS3Role": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {"Service": "lambda.amazonaws.com"}
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "Path": "/"
+      },
+      "Type": "AWS::IAM::Role"
+    },
+    "ClearS3RolePolicy": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "s3:*",
+                "ec2:*",
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Effect": "Allow",
+              "Resource": "*"
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "PolicyName": "Clear_S3_Role_Permissions",
+        "Roles": [
+          {
+            "Ref": "ClearS3Role"
+          }
+        ]
+      },
+      "Type": "AWS::IAM::Policy"
+    },
+    "ClearS3Lambda": {
+      "Properties": {
+        "Code": {
+          "ZipFile": {
+            "Fn::Join": [
+              "\n",
+              [
+                "import boto3",
+                "import cfnresponse",
+                "def handler(event, context):",
+                "  responseData = {}",
+                "  if event[\"RequestType\"] == \"Delete\":",
+                "    bucky = event[\"ResourceProperties\"][\"buckName\"]",
+                "    s3 = boto3.resource(\"s3\")",
+                "    bucket = s3.Bucket(bucky)",
+                "    try:",
+                "      for obj in bucket.objects.filter():",
+                "        s3.Object(bucket.name, obj.key).delete()",
+                "        responseData['data'] = 'Successfully deleted objects from the bucket'",
+                "      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, \"CustomResourcePhysicalID\")",
+                "    except Exception as e:",
+                "      responseData['data'] = e",
+                "      cfnresponse.send(event, context, cfnresponse.FAILED, responseData, \"CustomResourcePhysicalID\")",
+                "  else:",
+                "    responseData['data'] = 'Not a Delete action of the stack'",
+                "    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, \"CustomResourcePhysicalID\")"
+              ]
+            ]
+          }
+        },
+        "Description": "Lambda function to clear S3 bucket",
+        "Handler": "index.handler",
+        "MemorySize": "128",
+        "Role": {
+          "Fn::GetAtt": ["ClearS3Role", "Arn"]
+        },
+        "Runtime": "python2.7",
+        "Timeout": "300"
+      },
+      "Type": "AWS::Lambda::Function"
+    }
+  },
+  "Outputs" : {
+    "CSR1" : {
+      "Description" : "IP Address for CSR1",
+      "Value" : { "Fn::GetAtt" : [ "VpcCsr1", "PublicIp" ] } 
+    },
+    "CSR2" : {
+      "Condition" : "EnableHA",
+      "Description" : "IP Address for CSR2",
+      "Value" : { "Fn::GetAtt" : [ "VpcCsr2", "PublicIp" ] } 
+    },
+    "PublicSubnet1" : {
+      "Description" : "Public Subnet for CSR1",
+      "Value" : {"Fn::GetAtt" : ["FindSubnetAndGateway","AutoPubSubnet1" ]}
+    }, 
+    "PublicSubnet2" : {
+      "Condition" : "EnableHA",
+      "Description" : "Public Subnet for CSR2",
+      "Value" : {"Fn::GetAtt" : ["FindSubnetAndGateway","AutoPubSubnet2" ]}
+    }, 
+    "PrivateSubnet1" : {
+      "Condition" : "EnableHA",
+      "Description" : "Private Subnet for CSR1",
+      "Value" : {"Fn::GetAtt" : ["FindSubnetAndGateway","AutoPrivateSubnet1" ]}      
+    }, 
+    "PrivateSubnet2" : {
+      "Condition" : "EnableHA",
+      "Description" : "Private Subnet for CSR2",
+      "Value" : {"Fn::GetAtt" : ["FindSubnetAndGateway","AutoPrivateSubnet2" ]}      
+    },     
+    "PubSubGateway1" : {
+      "Description" : "Public subnet IP Gateway for CSR1",
+      "Value" : {"Fn::GetAtt" : ["FindSubnetAndGateway","PubGateway1" ]}            
+    }, 
+    "PubSubGateway2" : {
+      "Description" : "Public subnet IP Gateway for CSR2",
+      "Value" : {"Fn::GetAtt" : ["FindSubnetAndGateway","PubGateway2" ]}      
+      
+    },
+    "ConfigS3Bucket" : {
+      "Description" : "S3 bucket for storing VPN configuration information.",
+      "Value" : { "Ref" : "VPNConfigS3Bucket" } 
+    },
+    "BucketPrefix" : {
+      "Description" : "S3 prefix for storing VPN configuration information.",
+      "Value" : { "Ref" : "S3Prefix" } 
+    }
+  }
+}
