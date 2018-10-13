@@ -4,9 +4,13 @@ This repository contains cloudformation templates to deploy All CSR Transit VPC 
 The Autoscaling feature brings the ability to:
 
 1] Monitor different performance metrics for CSRs in Transit VPC (such as CPU Utilization, Network In/Out, CSR custom metrics and many more) using AWS Cloudwatch
+
 2] Adjust the CSR capacity (number of CSRs) in Transit VPC based on traffic load in the network. Currently we support only horizontal scaling with minimum capacity of 2 CSRs and maximum of 8 CSRs in Transit VPC.
+
 3] Automated creation and removal of VPN connections to spoke VPCs and on-premise VPN device as CSRs are added and removed from the Transit VPC.
+
 4] Customer can select BYOL or Hourly licenses for the newly added CSRs through autoscaling independent of the license model for initial two transit VPC CSRs
+
 5] Push custom IOS configurations to all the CSRs in Transit VPC through a configuration file
 
 Recommended:
